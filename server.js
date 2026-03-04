@@ -6,7 +6,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// Состояние игры
+// Состояние игры (гонка)
 let gameState = {
   players: [],
   obstacles: [],
@@ -16,7 +16,7 @@ let gameState = {
   baseSpeed: 2,
   currentSpeed: 2,
   maxSpeed: 8,
-  speedIncreaseInterval: 10, // секунд
+  speedIncreaseInterval: 10,
   lastSpeedIncrease: 0,
   width: 600,
   height: 800,
@@ -69,7 +69,6 @@ function startGame() {
     if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
   
-  // Увеличение скорости каждые 10 секунд
   speedTimer = setInterval(() => {
     if (gameState.gameActive && gameState.currentSpeed < gameState.maxSpeed) {
       gameState.currentSpeed += 0.5;
@@ -93,7 +92,6 @@ function stopGame() {
 function updateGame() {
   if (!gameState.gameActive) return;
 
-  // Движение препятствий с текущей скоростью
   gameState.obstacles.forEach(o => o.y += gameState.currentSpeed);
   gameState.obstacles = gameState.obstacles.filter(o => o.y < gameState.height);
 
@@ -111,16 +109,15 @@ function updateGame() {
     }
   }
 
-  // Столкновения между игроками + сильное отталкивание
+  // Столкновения между игроками + отталкивание
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const p1 = active[i];
       const p2 = active[j];
       const dist = Math.abs(p1.x - p2.x);
       if (dist < 30) {
-        // Сила отталкивания пропорциональна перекрытию
         const overlap = 30 - dist;
-        const force = overlap * 1.5; // чем сильнее врезались, тем сильнее отбрасывает
+        const force = overlap * 1.5;
         
         if (p1.x < p2.x) {
           p1.x = Math.max(20, p1.x - force);
@@ -130,11 +127,8 @@ function updateGame() {
           p1.x = Math.min(gameState.width - 50, p1.x + force);
         }
         
-        // Рассылаем обновлённые позиции
         io.emit('playerMoved', { id: p1.id, x: p1.x });
         io.emit('playerMoved', { id: p2.id, x: p2.x });
-        
-        // Отправляем событие столкновения для анимации
         io.emit('playerCollision', { id1: p1.id, id2: p2.id });
       }
     }
@@ -152,23 +146,21 @@ function updateGame() {
 
   const alive = gameState.players.filter(p => p.active).length;
   if (alive <= 1 && gameState.players.length > 1) {
-    // Игра окончена, определяем победителя
     const winner = gameState.players.find(p => p.active);
     const timeSurvived = Math.floor((Date.now() - gameState.startTime) / 1000);
     const score = timeSurvived * 10;
     
     if (winner) {
-      // Добавляем результат в таблицу лидеров
       leaderboards.race.push({
         name: winner.name,
         score: score,
         date: new Date().toISOString()
       });
-      // Сортируем и оставляем топ-10
       leaderboards.race.sort((a, b) => b.score - a.score);
       if (leaderboards.race.length > 10) leaderboards.race.pop();
       
       io.emit('gameOver', { winner: winner.name, score: score });
+      io.emit('leaderboards', leaderboards); // обновляем у всех
     } else {
       io.emit('gameOver', { winner: null, score: 0 });
     }
@@ -181,7 +173,6 @@ function updateGame() {
 io.on('connection', (socket) => {
   console.log('Подключился:', socket.id);
 
-  // Отправляем таблицы лидеров при подключении
   socket.emit('leaderboards', leaderboards);
 
   socket.on('join', ({ name, isAdmin, password }) => {
@@ -253,6 +244,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('leave', () => {
+    console.log('Игрок вышел по команде leave:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
     if (idx !== -1) {
       gameState.players.splice(idx, 1);
@@ -280,6 +272,15 @@ io.on('connection', (socket) => {
       io.to('game').emit('playersUpdate', gameState.players);
     }
     socket.leave('game');
+  });
+
+  // Админская команда очистки статистики
+  socket.on('adminClearStats', (password) => {
+    if (password === ADMIN_PASSWORD) {
+      leaderboards = { race: [], whac: [], snake: [] };
+      io.emit('leaderboards', leaderboards);
+      console.log('Статистика очищена админом');
+    }
   });
 });
 

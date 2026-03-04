@@ -45,7 +45,7 @@ function startGame() {
   gameState.players.forEach(p => p.active = true);
   if (gameLoop) clearInterval(gameLoop);
   if (obstacleGen) clearInterval(obstacleGen);
-  gameLoop = setInterval(updateGame, 50);
+  gameLoop = setInterval(updateGame, 100);
   obstacleGen = setInterval(() => {
     if (gameState.gameActive) {
       gameState.obstacles.push(createObstacle());

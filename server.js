@@ -1,10 +1,96 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
+
+// Подключение к PostgreSQL (Render автоматически подставит DATABASE_URL)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // обязательно для Render
+  }
+});
+
+// Создание таблиц при запуске
+async function initDatabase() {
+  try {
+    // Таблица для гонки
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS race (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Таблица для игры "Бей баги"
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS whac (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Таблица для змейки
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS snake (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    console.log('✅ Таблицы PostgreSQL созданы');
+  } catch (err) {
+    console.error('❌ Ошибка создания таблиц:', err);
+  }
+}
+
+initDatabase();
+
+// Функции для работы с лидерами
+async function getTopScores(game, limit = 10) {
+  try {
+    const result = await pool.query(
+      `SELECT name, score, date FROM ${game} ORDER BY score DESC LIMIT $1`,
+      [limit]
+    );
+    return result.rows;
+  } catch (err) {
+    console.error(`Ошибка получения лидеров для ${game}:`, err);
+    return [];
+  }
+}
+
+async function addScore(game, name, score) {
+  try {
+    await pool.query(
+      `INSERT INTO ${game} (name, score) VALUES ($1, $2)`,
+      [name, score]
+    );
+  } catch (err) {
+    console.error(`Ошибка добавления счёта в ${game}:`, err);
+  }
+}
+
+async function clearAllScores() {
+  try {
+    await pool.query('DELETE FROM race');
+    await pool.query('DELETE FROM whac');
+    await pool.query('DELETE FROM snake');
+    console.log('✅ Все таблицы лидеров очищены');
+  } catch (err) {
+    console.error('Ошибка очистки таблиц:', err);
+  }
+}
 
 // Состояние игры (гонка)
 let gameState = {
@@ -21,13 +107,6 @@ let gameState = {
   width: 600,
   height: 800,
   generationInterval: 700
-};
-
-// Таблицы лидеров (хранятся в памяти)
-let leaderboards = {
-  race: [],
-  whac: [],
-  snake: []
 };
 
 const ADMIN_PASSWORD = 'admin';
@@ -151,16 +230,17 @@ function updateGame() {
     const score = timeSurvived * 10;
     
     if (winner) {
-      leaderboards.race.push({
-        name: winner.name,
-        score: score,
-        date: new Date().toISOString()
+      // Сохраняем результат в PostgreSQL
+      addScore('race', winner.name, score).then(async () => {
+        const topScores = await getTopScores('race');
+        io.emit('leaderboards', { 
+          race: topScores, 
+          whac: await getTopScores('whac'), 
+          snake: await getTopScores('snake') 
+        });
       });
-      leaderboards.race.sort((a, b) => b.score - a.score);
-      if (leaderboards.race.length > 10) leaderboards.race.pop();
       
       io.emit('gameOver', { winner: winner.name, score: score });
-      io.emit('leaderboards', leaderboards); // обновляем у всех
     } else {
       io.emit('gameOver', { winner: null, score: 0 });
     }
@@ -170,10 +250,20 @@ function updateGame() {
   io.emit('obstacles', gameState.obstacles);
 }
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   console.log('Подключился:', socket.id);
 
-  socket.emit('leaderboards', leaderboards);
+  // Отправляем актуальные таблицы лидеров при подключении
+  try {
+    const [race, whac, snake] = await Promise.all([
+      getTopScores('race'),
+      getTopScores('whac'),
+      getTopScores('snake')
+    ]);
+    socket.emit('leaderboards', { race, whac, snake });
+  } catch (err) {
+    console.error('Ошибка загрузки лидеров:', err);
+  }
 
   socket.on('join', ({ name, isAdmin, password }) => {
     if (gameState.players.some(p => p.id === socket.id)) {
@@ -274,16 +364,28 @@ io.on('connection', (socket) => {
     socket.leave('game');
   });
 
+  // Обработка результатов из других игр (snake, whac)
+  socket.on('submitScore', async ({ game, name, score }) => {
+    await addScore(game, name, score);
+    const topScores = await getTopScores(game);
+    io.emit('leaderboards', { 
+      race: await getTopScores('race'), 
+      whac: await getTopScores('whac'), 
+      snake: await getTopScores('snake') 
+    });
+  });
+
   // Админская команда очистки статистики
-  socket.on('adminClearStats', (password) => {
+  socket.on('adminClearStats', async (password) => {
     if (password === ADMIN_PASSWORD) {
-      leaderboards = { race: [], whac: [], snake: [] };
-      io.emit('leaderboards', leaderboards);
+      await clearAllScores();
+      io.emit('leaderboards', { race: [], whac: [], snake: [] });
       console.log('Статистика очищена админом');
     }
   });
 });
 
-server.listen(3000, () => {
-  console.log('Сервер гонки на порту 3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Сервер гонки на порту ${PORT}`);
 });

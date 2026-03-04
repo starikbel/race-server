@@ -6,23 +6,36 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+// Состояние игры
 let gameState = {
   players: [],
   obstacles: [],
   hostId: null,
   gameActive: false,
+  startTime: 0,
+  baseSpeed: 2,
+  currentSpeed: 2,
+  maxSpeed: 8,
+  speedIncreaseInterval: 10, // секунд
+  lastSpeedIncrease: 0,
   width: 600,
   height: 800,
-  obstacleSpeed: 3,
   generationInterval: 700
+};
+
+// Таблицы лидеров (хранятся в памяти)
+let leaderboards = {
+  race: [],
+  whac: [],
+  snake: []
 };
 
 const ADMIN_PASSWORD = 'admin';
 const MAX_PLAYERS = 17;
 
 function generateName() {
-  const names = ['Гонщик', 'Спидер', 'Вихрь', 'Молния'];
-  return names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 100);
+  const names = ['Гонщик', 'Спидер', 'Вихрь', 'Молния', 'Торнадо', 'Шторм'];
+  return names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
 }
 
 function createObstacle() {
@@ -37,39 +50,55 @@ function createObstacle() {
 
 let gameLoop = null;
 let obstacleGen = null;
+let speedTimer = null;
 
-// Вместо предыдущего gameLoop = setInterval(updateGame, 50) теперь 100
 function startGame() {
   gameState.gameActive = true;
+  gameState.startTime = Date.now();
+  gameState.currentSpeed = gameState.baseSpeed;
+  gameState.lastSpeedIncrease = Date.now();
   gameState.obstacles = [];
   gameState.players.forEach(p => p.active = true);
+  
   if (gameLoop) clearInterval(gameLoop);
   if (obstacleGen) clearInterval(obstacleGen);
-  gameLoop = setInterval(updateGame, 100); // было 50
+  if (speedTimer) clearInterval(speedTimer);
+  
+  gameLoop = setInterval(updateGame, 50);
   obstacleGen = setInterval(() => {
     if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
+  
+  // Увеличение скорости каждые 10 секунд
+  speedTimer = setInterval(() => {
+    if (gameState.gameActive && gameState.currentSpeed < gameState.maxSpeed) {
+      gameState.currentSpeed += 0.5;
+      console.log(`Скорость увеличена до ${gameState.currentSpeed}`);
+    }
+  }, gameState.speedIncreaseInterval * 1000);
+  
   io.emit('gameStarted');
 }
 
 function stopGame() {
   if (gameLoop) clearInterval(gameLoop);
   if (obstacleGen) clearInterval(obstacleGen);
+  if (speedTimer) clearInterval(speedTimer);
   gameLoop = null;
   obstacleGen = null;
+  speedTimer = null;
   gameState.gameActive = false;
 }
 
 function updateGame() {
   if (!gameState.gameActive) return;
 
-  // Двигаем препятствия
-  gameState.obstacles.forEach(o => o.y += gameState.obstacleSpeed);
+  // Движение препятствий с текущей скоростью
+  gameState.obstacles.forEach(o => o.y += gameState.currentSpeed);
   gameState.obstacles = gameState.obstacles.filter(o => o.y < gameState.height);
 
   const active = gameState.players.filter(p => p.active);
   const crashed = new Set();
-  const collisions = []; // для отталкивания
 
   // Столкновения с препятствиями
   for (let p of active) {
@@ -82,52 +111,68 @@ function updateGame() {
     }
   }
 
-  // Столкновения между игроками и отталкивание
+  // Столкновения между игроками + сильное отталкивание
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
-      const a = active[i];
-      const b = active[j];
-      const dist = Math.abs(a.x - b.x);
+      const p1 = active[i];
+      const p2 = active[j];
+      const dist = Math.abs(p1.x - p2.x);
       if (dist < 30) {
-        // Оба могут выбыть (по желанию)
-        // crashed.add(a.id);
-        // crashed.add(b.id);
-        // Вместо выбывания добавим отталкивание
-        collisions.push({ a, b });
+        // Сила отталкивания пропорциональна перекрытию
+        const overlap = 30 - dist;
+        const force = overlap * 1.5; // чем сильнее врезались, тем сильнее отбрасывает
+        
+        if (p1.x < p2.x) {
+          p1.x = Math.max(20, p1.x - force);
+          p2.x = Math.min(gameState.width - 50, p2.x + force);
+        } else {
+          p2.x = Math.max(20, p2.x - force);
+          p1.x = Math.min(gameState.width - 50, p1.x + force);
+        }
+        
+        // Рассылаем обновлённые позиции
+        io.emit('playerMoved', { id: p1.id, x: p1.x });
+        io.emit('playerMoved', { id: p2.id, x: p2.x });
+        
+        // Отправляем событие столкновения для анимации
+        io.emit('playerCollision', { id1: p1.id, id2: p2.id });
       }
     }
   }
 
-  // Отталкивание (разъезжаются)
-  for (let { a, b } of collisions) {
-    if (a.x < b.x) {
-      a.x = Math.max(20, a.x - 5);
-      b.x = Math.min(gameState.width - 50, b.x + 5);
-    } else {
-      a.x = Math.min(gameState.width - 50, a.x + 5);
-      b.x = Math.max(20, b.x - 5);
-    }
-    // Отправляем обновленные позиции
-    io.to('game').emit('playerMoved', { id: a.id, x: a.x });
-    io.to('game').emit('playerMoved', { id: b.id, x: b.x });
-  }
-
-  // Обработка выбывших
   if (crashed.size) {
     gameState.players.forEach(p => {
       if (crashed.has(p.id)) {
         p.active = false;
-        io.to(p.id).emit('playerCrashed'); // звук столкновения
+        io.to(p.id).emit('playerCrashed');
       }
     });
     io.emit('playersUpdate', gameState.players);
   }
 
-  // Проверка окончания игры
   const alive = gameState.players.filter(p => p.active).length;
-  if (alive === 0) {
+  if (alive <= 1 && gameState.players.length > 1) {
+    // Игра окончена, определяем победителя
+    const winner = gameState.players.find(p => p.active);
+    const timeSurvived = Math.floor((Date.now() - gameState.startTime) / 1000);
+    const score = timeSurvived * 10;
+    
+    if (winner) {
+      // Добавляем результат в таблицу лидеров
+      leaderboards.race.push({
+        name: winner.name,
+        score: score,
+        date: new Date().toISOString()
+      });
+      // Сортируем и оставляем топ-10
+      leaderboards.race.sort((a, b) => b.score - a.score);
+      if (leaderboards.race.length > 10) leaderboards.race.pop();
+      
+      io.emit('gameOver', { winner: winner.name, score: score });
+    } else {
+      io.emit('gameOver', { winner: null, score: 0 });
+    }
     stopGame();
-    io.emit('gameOver', { winner: null });
   }
 
   io.emit('obstacles', gameState.obstacles);
@@ -136,23 +181,21 @@ function updateGame() {
 io.on('connection', (socket) => {
   console.log('Подключился:', socket.id);
 
-  socket.on('join', ({ name, isAdmin, password }) => {
-    console.log(`Запрос на вход от ${socket.id}, админ: ${isAdmin}`);
+  // Отправляем таблицы лидеров при подключении
+  socket.emit('leaderboards', leaderboards);
 
+  socket.on('join', ({ name, isAdmin, password }) => {
     if (gameState.players.some(p => p.id === socket.id)) {
       socket.emit('error', 'Вы уже подключены');
       return;
     }
 
-    if (isAdmin) {
-      if (password === ADMIN_PASSWORD) {
-        gameState.hostId = socket.id;
-        socket.emit('hostStatus', true);
-        console.log(`👑 Админ ${socket.id} назначен хостом`);
-      } else {
-        socket.emit('error', 'Неверный пароль админа');
-        return;
-      }
+    if (isAdmin && password === ADMIN_PASSWORD) {
+      gameState.hostId = socket.id;
+      socket.emit('hostStatus', true);
+    } else if (isAdmin) {
+      socket.emit('error', 'Неверный пароль админа');
+      return;
     }
 
     if (gameState.players.length >= MAX_PLAYERS) {
@@ -172,7 +215,6 @@ io.on('connection', (socket) => {
     if (!gameState.hostId) {
       gameState.hostId = socket.id;
       socket.emit('hostStatus', true);
-      console.log(`👑 Первый игрок ${socket.id} стал хостом`);
     }
 
     socket.join('game');
@@ -196,13 +238,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('startGame', () => {
-    console.log(`Попытка старта от ${socket.id}, хост: ${gameState.hostId}, игра активна: ${gameState.gameActive}`);
     if (socket.id === gameState.hostId && !gameState.gameActive) {
-      // Сбрасываем игроков и препятствия
-      gameState.players.forEach(p => p.active = true);
-      gameState.obstacles = [];
-      io.to('game').emit('playersUpdate', gameState.players);
-
       let count = 3;
       io.to('game').emit('countdown', count);
       const timer = setInterval(() => {
@@ -215,24 +251,23 @@ io.on('connection', (socket) => {
       }, 1000);
     }
   });
-// Добавить обработчик leave внутри io.on('connection', ...)
-socket.on('leave', () => {
-  console.log('Игрок вышел по команде leave:', socket.id);
-  const idx = gameState.players.findIndex(p => p.id === socket.id);
-  if (idx !== -1) {
-    gameState.players.splice(idx, 1);
-    if (socket.id === gameState.hostId) {
-      gameState.hostId = gameState.players[0]?.id || null;
-      if (gameState.hostId) {
-        io.to(gameState.hostId).emit('hostStatus', true);
+
+  socket.on('leave', () => {
+    const idx = gameState.players.findIndex(p => p.id === socket.id);
+    if (idx !== -1) {
+      gameState.players.splice(idx, 1);
+      if (socket.id === gameState.hostId) {
+        gameState.hostId = gameState.players[0]?.id || null;
+        if (gameState.hostId) {
+          io.to(gameState.hostId).emit('hostStatus', true);
+        }
       }
+      io.to('game').emit('playersUpdate', gameState.players);
     }
-    io.to('game').emit('playersUpdate', gameState.players);
-  }
-  socket.leave('game');
-});
+    socket.leave('game');
+  });
+
   socket.on('disconnect', () => {
-    console.log('Отключился:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
     if (idx !== -1) {
       gameState.players.splice(idx, 1);
@@ -249,5 +284,5 @@ socket.on('leave', () => {
 });
 
 server.listen(3000, () => {
-  console.log('Сервер на порту 3000');
+  console.log('Сервер гонки на порту 3000');
 });

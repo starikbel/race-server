@@ -38,18 +38,16 @@ function createObstacle() {
 let gameLoop = null;
 let obstacleGen = null;
 
+// Вместо предыдущего gameLoop = setInterval(updateGame, 50) теперь 100
 function startGame() {
   gameState.gameActive = true;
   gameState.obstacles = [];
-  // Сбрасываем состояние игроков (все живы)
   gameState.players.forEach(p => p.active = true);
   if (gameLoop) clearInterval(gameLoop);
   if (obstacleGen) clearInterval(obstacleGen);
-  gameLoop = setInterval(updateGame, 100);
+  gameLoop = setInterval(updateGame, 100); // было 50
   obstacleGen = setInterval(() => {
-    if (gameState.gameActive) {
-      gameState.obstacles.push(createObstacle());
-    }
+    if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
   io.emit('gameStarted');
 }
@@ -217,21 +215,21 @@ io.on('connection', (socket) => {
       }, 1000);
     }
   });
+// Добавить обработчик leave внутри io.on('connection', ...)
 socket.on('leave', () => {
-    console.log('Игрок вышел по команде leave:', socket.id);
-    // Удаляем игрока из gameState.players (аналогично disconnect)
-    const idx = gameState.players.findIndex(p => p.id === socket.id);
-    if (idx !== -1) {
-        gameState.players.splice(idx, 1);
-        if (socket.id === gameState.hostId) {
-            gameState.hostId = gameState.players[0]?.id || null;
-            if (gameState.hostId) {
-                io.to(gameState.hostId).emit('hostStatus', true);
-            }
-        }
-        io.to('game').emit('playersUpdate', gameState.players);
+  console.log('Игрок вышел по команде leave:', socket.id);
+  const idx = gameState.players.findIndex(p => p.id === socket.id);
+  if (idx !== -1) {
+    gameState.players.splice(idx, 1);
+    if (socket.id === gameState.hostId) {
+      gameState.hostId = gameState.players[0]?.id || null;
+      if (gameState.hostId) {
+        io.to(gameState.hostId).emit('hostStatus', true);
+      }
     }
-    socket.leave('game');
+    io.to('game').emit('playersUpdate', gameState.players);
+  }
+  socket.leave('game');
 });
   socket.on('disconnect', () => {
     console.log('Отключился:', socket.id);

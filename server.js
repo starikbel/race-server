@@ -217,7 +217,22 @@ io.on('connection', (socket) => {
       }, 1000);
     }
   });
-
+socket.on('leave', () => {
+    console.log('Игрок вышел по команде leave:', socket.id);
+    // Удаляем игрока из gameState.players (аналогично disconnect)
+    const idx = gameState.players.findIndex(p => p.id === socket.id);
+    if (idx !== -1) {
+        gameState.players.splice(idx, 1);
+        if (socket.id === gameState.hostId) {
+            gameState.hostId = gameState.players[0]?.id || null;
+            if (gameState.hostId) {
+                io.to(gameState.hostId).emit('hostStatus', true);
+            }
+        }
+        io.to('game').emit('playersUpdate', gameState.players);
+    }
+    socket.leave('game');
+});
   socket.on('disconnect', () => {
     console.log('Отключился:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);

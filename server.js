@@ -5,20 +5,23 @@ const { Pool } = require('pg');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { 
+  cors: { origin: '*' },
+  pingTimeout: 60000,
+  pingInterval: 25000
+});
 
-// Подключение к PostgreSQL (Render автоматически подставит DATABASE_URL)
+// Подключение к PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false // обязательно для Render
+    rejectUnauthorized: false
   }
 });
 
-// Создание таблиц при запуске
+// Создание таблиц
 async function initDatabase() {
   try {
-    // Таблица для гонки
     await pool.query(`
       CREATE TABLE IF NOT EXISTS race (
         id SERIAL PRIMARY KEY,
@@ -27,8 +30,6 @@ async function initDatabase() {
         date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
-    // Таблица для игры "Бей баги"
     await pool.query(`
       CREATE TABLE IF NOT EXISTS whac (
         id SERIAL PRIMARY KEY,
@@ -37,8 +38,6 @@ async function initDatabase() {
         date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
-    // Таблица для змейки
     await pool.query(`
       CREATE TABLE IF NOT EXISTS snake (
         id SERIAL PRIMARY KEY,
@@ -47,13 +46,11 @@ async function initDatabase() {
         date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
     console.log('✅ Таблицы PostgreSQL созданы');
   } catch (err) {
     console.error('❌ Ошибка создания таблиц:', err);
   }
 }
-
 initDatabase();
 
 // Функции для работы с лидерами
@@ -92,7 +89,7 @@ async function clearAllScores() {
   }
 }
 
-// Состояние игры (гонка)
+// Состояние игры
 let gameState = {
   players: [],
   obstacles: [],
@@ -101,12 +98,12 @@ let gameState = {
   startTime: 0,
   baseSpeed: 2,
   currentSpeed: 2,
-  maxSpeed: 8,
+  maxSpeed: 10,
   speedIncreaseInterval: 10,
   lastSpeedIncrease: 0,
   width: 600,
   height: 800,
-  generationInterval: 700
+  generationInterval: 600
 };
 
 const ADMIN_PASSWORD = 'admin';
@@ -119,7 +116,7 @@ function generateName() {
 
 function createObstacle() {
   return {
-    id: Math.random().toString(36).substring(2, 6),
+    id: Math.random().toString(36).substring(2, 8),
     x: Math.random() * (gameState.width - 60) + 30,
     y: 0,
     w: 30,
@@ -131,10 +128,17 @@ let gameLoop = null;
 let obstacleGen = null;
 let speedTimer = null;
 
+function getSpeedMultiplier() {
+  const playerCount = gameState.players.length;
+  if (playerCount <= 1) return 1.6;      // Очень быстро для одного
+  if (playerCount <= 3) return 1.3;       // Быстро для 2-3
+  return 1.0;                              // Нормально для 4+
+}
+
 function startGame() {
   gameState.gameActive = true;
   gameState.startTime = Date.now();
-  gameState.currentSpeed = gameState.baseSpeed;
+  gameState.currentSpeed = gameState.baseSpeed * getSpeedMultiplier();
   gameState.lastSpeedIncrease = Date.now();
   gameState.obstacles = [];
   gameState.players.forEach(p => p.active = true);
@@ -148,17 +152,20 @@ function startGame() {
     if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
   
+  // Увеличение скорости с учётом количества игроков
   speedTimer = setInterval(() => {
     if (gameState.gameActive && gameState.currentSpeed < gameState.maxSpeed) {
-      gameState.currentSpeed += 0.5;
-      console.log(`Скорость увеличена до ${gameState.currentSpeed}`);
+      const multiplier = getSpeedMultiplier();
+      gameState.currentSpeed += 0.4 * multiplier;
+      console.log(`Скорость увеличена до ${gameState.currentSpeed.toFixed(1)} (игроков: ${gameState.players.length})`);
     }
-  }, gameState.speedIncreaseInterval * 1000);
+  }, 8000); // Каждые 8 секунд
   
   io.emit('gameStarted');
+  io.emit('speedUpdate', gameState.currentSpeed);
 }
 
-function stopGame() {
+function stopGame(reason = 'normal') {
   if (gameLoop) clearInterval(gameLoop);
   if (obstacleGen) clearInterval(obstacleGen);
   if (speedTimer) clearInterval(speedTimer);
@@ -166,10 +173,21 @@ function stopGame() {
   obstacleGen = null;
   speedTimer = null;
   gameState.gameActive = false;
+  
+  if (reason === 'noPlayers') {
+    io.emit('gameClosed', 'Нет активных игроков');
+  }
 }
 
 function updateGame() {
   if (!gameState.gameActive) return;
+
+  // Проверка на наличие активных игроков
+  const hasActive = gameState.players.some(p => p.active);
+  if (!hasActive) {
+    stopGame('noPlayers');
+    return;
+  }
 
   gameState.obstacles.forEach(o => o.y += gameState.currentSpeed);
   gameState.obstacles = gameState.obstacles.filter(o => o.y < gameState.height);
@@ -188,15 +206,15 @@ function updateGame() {
     }
   }
 
-  // Столкновения между игроками + отталкивание
+  // Столкновения между игроками + мощное отталкивание (теперь видно всем!)
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const p1 = active[i];
       const p2 = active[j];
       const dist = Math.abs(p1.x - p2.x);
-      if (dist < 30) {
-        const overlap = 30 - dist;
-        const force = overlap * 1.5;
+      if (dist < 35) { // Увеличил радиус столкновения
+        const overlap = 35 - dist;
+        const force = overlap * 2.5; // ОЧЕНЬ сильное отталкивание
         
         if (p1.x < p2.x) {
           p1.x = Math.max(20, p1.x - force);
@@ -206,9 +224,10 @@ function updateGame() {
           p1.x = Math.min(gameState.width - 50, p1.x + force);
         }
         
+        // Рассылаем всем, включая отправителя
         io.emit('playerMoved', { id: p1.id, x: p1.x });
         io.emit('playerMoved', { id: p2.id, x: p2.x });
-        io.emit('playerCollision', { id1: p1.id, id2: p2.id });
+        io.emit('playerCollision', { id1: p1.id, id2: p2.id, force: force });
       }
     }
   }
@@ -230,7 +249,6 @@ function updateGame() {
     const score = timeSurvived * 10;
     
     if (winner) {
-      // Сохраняем результат в PostgreSQL
       addScore('race', winner.name, score).then(async () => {
         const topScores = await getTopScores('race');
         io.emit('leaderboards', { 
@@ -248,12 +266,12 @@ function updateGame() {
   }
 
   io.emit('obstacles', gameState.obstacles);
+  io.emit('speedUpdate', gameState.currentSpeed);
 }
 
 io.on('connection', async (socket) => {
   console.log('Подключился:', socket.id);
 
-  // Отправляем актуальные таблицы лидеров при подключении
   try {
     const [race, whac, snake] = await Promise.all([
       getTopScores('race'),
@@ -305,7 +323,8 @@ io.on('connection', async (socket) => {
       gameActive: gameState.gameActive,
       hostId: gameState.hostId,
       width: gameState.width,
-      height: gameState.height
+      height: gameState.height,
+      currentSpeed: gameState.currentSpeed
     });
     io.to('game').emit('playersUpdate', gameState.players);
   });
@@ -345,11 +364,17 @@ io.on('connection', async (socket) => {
         }
       }
       io.to('game').emit('playersUpdate', gameState.players);
+      
+      // Если не осталось игроков, завершаем игру
+      if (gameState.players.length === 0 && gameState.gameActive) {
+        stopGame('noPlayers');
+      }
     }
     socket.leave('game');
   });
 
   socket.on('disconnect', () => {
+    console.log('Отключился:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
     if (idx !== -1) {
       gameState.players.splice(idx, 1);
@@ -360,11 +385,15 @@ io.on('connection', async (socket) => {
         }
       }
       io.to('game').emit('playersUpdate', gameState.players);
+      
+      // Если не осталось игроков, завершаем игру
+      if (gameState.players.length === 0 && gameState.gameActive) {
+        stopGame('noPlayers');
+      }
     }
     socket.leave('game');
   });
 
-  // Обработка результатов из других игр (snake, whac)
   socket.on('submitScore', async ({ game, name, score }) => {
     await addScore(game, name, score);
     const topScores = await getTopScores(game);
@@ -375,7 +404,6 @@ io.on('connection', async (socket) => {
     });
   });
 
-  // Админская команда очистки статистики
   socket.on('adminClearStats', async (password) => {
     if (password === ADMIN_PASSWORD) {
       await clearAllScores();

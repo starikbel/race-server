@@ -206,15 +206,15 @@ function updateGame() {
     }
   }
 
-  // Столкновения между игроками + мощное отталкивание (теперь видно всем!)
+  // Столкновения между игроками + мощное отталкивание
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const p1 = active[i];
       const p2 = active[j];
       const dist = Math.abs(p1.x - p2.x);
-      if (dist < 35) { // Увеличил радиус столкновения
+      if (dist < 35) {
         const overlap = 35 - dist;
-        const force = overlap * 2.5; // ОЧЕНЬ сильное отталкивание
+        const force = overlap * 2.5;
         
         if (p1.x < p2.x) {
           p1.x = Math.max(20, p1.x - force);
@@ -350,6 +350,26 @@ io.on('connection', async (socket) => {
         }
       }, 1000);
     }
+  });
+
+  // ===== НОВЫЕ ОБРАБОТЧИКИ ДЛЯ СТРЕЛЬБЫ =====
+  socket.on('shoot', ({ x, y, bulletId }) => {
+    // Проверяем, что игрок активен и игра идёт
+    const player = gameState.players.find(p => p.id === socket.id);
+    if (player && player.active && gameState.gameActive) {
+      // Рассылаем всем информацию о выстреле
+      socket.to('game').emit('bulletFired', {
+        x, y, bulletId,
+        ownerId: socket.id
+      });
+    }
+  });
+
+  socket.on('bulletHit', ({ bulletId, obstacleId }) => {
+    // Удаляем препятствие
+    gameState.obstacles = gameState.obstacles.filter(o => o.id !== obstacleId);
+    // Рассылаем всем
+    io.to('game').emit('bulletHit', { bulletId, obstacleId });
   });
 
   socket.on('leave', () => {

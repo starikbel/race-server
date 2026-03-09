@@ -46,6 +46,14 @@ async function initDatabase() {
         date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS guess (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     console.log('✅ Таблицы PostgreSQL созданы');
   } catch (err) {
     console.error('❌ Ошибка создания таблиц:', err);
@@ -83,6 +91,7 @@ async function clearAllScores() {
     await pool.query('DELETE FROM race');
     await pool.query('DELETE FROM whac');
     await pool.query('DELETE FROM snake');
+    await pool.query('DELETE FROM guess');
     console.log('✅ Все таблицы лидеров очищены');
   } catch (err) {
     console.error('Ошибка очистки таблиц:', err);
@@ -98,9 +107,7 @@ let gameState = {
   startTime: 0,
   baseSpeed: 2,
   currentSpeed: 2,
-  maxSpeed: 10,
-  speedIncreaseInterval: 10,
-  lastSpeedIncrease: 0,
+  speedIncreaseInterval: 8, // секунд
   width: 600,
   height: 800,
   generationInterval: 600
@@ -139,7 +146,6 @@ function startGame() {
   gameState.gameActive = true;
   gameState.startTime = Date.now();
   gameState.currentSpeed = gameState.baseSpeed * getSpeedMultiplier();
-  gameState.lastSpeedIncrease = Date.now();
   gameState.obstacles = [];
   gameState.players.forEach(p => p.active = true);
   
@@ -152,14 +158,14 @@ function startGame() {
     if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
   
-  // Увеличение скорости с учётом количества игроков
+  // Увеличение скорости (бесконечно, без maxSpeed)
   speedTimer = setInterval(() => {
-    if (gameState.gameActive && gameState.currentSpeed < gameState.maxSpeed) {
+    if (gameState.gameActive) {
       const multiplier = getSpeedMultiplier();
       gameState.currentSpeed += 0.4 * multiplier;
       console.log(`Скорость увеличена до ${gameState.currentSpeed.toFixed(1)} (игроков: ${gameState.players.length})`);
     }
-  }, 8000); // Каждые 8 секунд
+  }, gameState.speedIncreaseInterval * 1000);
   
   io.emit('gameStarted');
   io.emit('speedUpdate', gameState.currentSpeed);
@@ -190,6 +196,28 @@ function updateGame() {
   }
 
   gameState.obstacles.forEach(o => o.y += gameState.currentSpeed);
+  
+  // ===== НОВОЕ: проверка, достигли ли препятствия нижнего края =====
+  const obstaclesAtBottom = gameState.obstacles.filter(o => o.y + o.h >= gameState.height);
+  
+  if (obstaclesAtBottom.length > 0) {
+    // Препятствия достигли нижнего края - игра заканчивается
+    const timeSurvived = Math.floor((Date.now() - gameState.startTime) / 1000);
+    const score = timeSurvived * 10;
+    
+    // Все игроки проигрывают (если препятствие достигло низа)
+    gameState.players.forEach(p => {
+      p.active = false;
+    });
+    
+    // Отправляем информацию о конце игры
+    io.emit('playersUpdate', gameState.players);
+    io.emit('gameOver', { winner: null, score: score, reason: 'Препятствие достигло финиша' });
+    stopGame();
+    return;
+  }
+  
+  // Удаляем препятствия, ушедшие за экран (хотя они не должны, т.к. выше мы остановили игру)
   gameState.obstacles = gameState.obstacles.filter(o => o.y < gameState.height);
 
   const active = gameState.players.filter(p => p.active);
@@ -224,7 +252,6 @@ function updateGame() {
           p1.x = Math.min(gameState.width - 50, p1.x + force);
         }
         
-        // Рассылаем всем, включая отправителя
         io.emit('playerMoved', { id: p1.id, x: p1.x });
         io.emit('playerMoved', { id: p2.id, x: p2.x });
         io.emit('playerCollision', { id1: p1.id, id2: p2.id, force: force });
@@ -254,7 +281,8 @@ function updateGame() {
         io.emit('leaderboards', { 
           race: topScores, 
           whac: await getTopScores('whac'), 
-          snake: await getTopScores('snake') 
+          snake: await getTopScores('snake'),
+          guess: await getTopScores('guess')
         });
       });
       
@@ -273,12 +301,13 @@ io.on('connection', async (socket) => {
   console.log('Подключился:', socket.id);
 
   try {
-    const [race, whac, snake] = await Promise.all([
+    const [race, whac, snake, guess] = await Promise.all([
       getTopScores('race'),
       getTopScores('whac'),
-      getTopScores('snake')
+      getTopScores('snake'),
+      getTopScores('guess')
     ]);
-    socket.emit('leaderboards', { race, whac, snake });
+    socket.emit('leaderboards', { race, whac, snake, guess });
   } catch (err) {
     console.error('Ошибка загрузки лидеров:', err);
   }
@@ -352,12 +381,10 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // ===== НОВЫЕ ОБРАБОТЧИКИ ДЛЯ СТРЕЛЬБЫ =====
+  // Обработка выстрелов
   socket.on('shoot', ({ x, y, bulletId }) => {
-    // Проверяем, что игрок активен и игра идёт
     const player = gameState.players.find(p => p.id === socket.id);
     if (player && player.active && gameState.gameActive) {
-      // Рассылаем всем информацию о выстреле
       socket.to('game').emit('bulletFired', {
         x, y, bulletId,
         ownerId: socket.id
@@ -366,9 +393,7 @@ io.on('connection', async (socket) => {
   });
 
   socket.on('bulletHit', ({ bulletId, obstacleId }) => {
-    // Удаляем препятствие
     gameState.obstacles = gameState.obstacles.filter(o => o.id !== obstacleId);
-    // Рассылаем всем
     io.to('game').emit('bulletHit', { bulletId, obstacleId });
   });
 
@@ -385,7 +410,6 @@ io.on('connection', async (socket) => {
       }
       io.to('game').emit('playersUpdate', gameState.players);
       
-      // Если не осталось игроков, завершаем игру
       if (gameState.players.length === 0 && gameState.gameActive) {
         stopGame('noPlayers');
       }
@@ -406,7 +430,6 @@ io.on('connection', async (socket) => {
       }
       io.to('game').emit('playersUpdate', gameState.players);
       
-      // Если не осталось игроков, завершаем игру
       if (gameState.players.length === 0 && gameState.gameActive) {
         stopGame('noPlayers');
       }
@@ -420,14 +443,15 @@ io.on('connection', async (socket) => {
     io.emit('leaderboards', { 
       race: await getTopScores('race'), 
       whac: await getTopScores('whac'), 
-      snake: await getTopScores('snake') 
+      snake: await getTopScores('snake'),
+      guess: await getTopScores('guess')
     });
   });
 
   socket.on('adminClearStats', async (password) => {
     if (password === ADMIN_PASSWORD) {
       await clearAllScores();
-      io.emit('leaderboards', { race: [], whac: [], snake: [] });
+      io.emit('leaderboards', { race: [], whac: [], snake: [], guess: [] });
       console.log('Статистика очищена админом');
     }
   });

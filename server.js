@@ -3,6 +3,9 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
 
+// ===== ПОДКЛЮЧАЕМ БАЗУ ПЛОХИХ СЛОВ ИЗ ОТДЕЛЬНОГО ФАЙЛА =====
+const BAD_WORDS = require('./badWords.js');
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { 
@@ -18,6 +21,63 @@ const pool = new Pool({
     rejectUnauthorized: false
   }
 });
+
+// Функция проверки имени
+function validateName(name) {
+  if (!name || name.length < 2 || name.length > 20) return false;
+  
+  const lowerName = name.toLowerCase().replace(/\s+/g, '');
+  
+  // Проверка на плохие слова
+  for (let word of BAD_WORDS) {
+    // Проверка на точное вхождение слова
+    if (lowerName.includes(word.toLowerCase())) {
+      console.log(`[FILTER] Заблокировано имя "${name}" (содержит "${word}")`);
+      return false;
+    }
+    
+    // Проверка на слова с заменой букв на похожие (leet-вариации)
+    const leetVariations = word
+      .replace(/a/g, '[a@4]')
+      .replace(/e/g, '[e3]')
+      .replace(/i/g, '[i1!]')
+      .replace(/o/g, '[o0]')
+      .replace(/s/g, '[s5$]');
+    
+    const leetRegex = new RegExp(leetVariations, 'i');
+    if (leetRegex.test(lowerName)) {
+      console.log(`[FILTER] Заблокировано имя "${name}" (leet-вариация "${word}")`);
+      return false;
+    }
+  }
+  
+  // Проверка на спецсимволы (только буквы, цифры, подчёркивание и пробелы)
+  const validRegex = /^[a-zA-Zа-яА-ЯёЁ0-9_ ]+$/;
+  if (!validRegex.test(name)) {
+    console.log(`[FILTER] Заблокировано имя "${name}" (недопустимые символы)`);
+    return false;
+  }
+  
+  return true;
+}
+
+// ===== РАСШИРЕННОЕ СОСТОЯНИЕ ДЛЯ АДМИНКИ =====
+let bannedIPs = new Set();
+let bannedUsers = new Map();
+let adminLog = [];
+
+function logAdmin(action, adminName, targetName, reason = '') {
+  const entry = {
+    time: new Date().toISOString(),
+    admin: adminName,
+    action: action,
+    target: targetName,
+    reason: reason
+  };
+  adminLog.unshift(entry);
+  if (adminLog.length > 100) adminLog.pop();
+  console.log(`[ADMIN] ${adminName} ${action} ${targetName} ${reason ? '('+reason+')' : ''}`);
+}
 
 // Создание таблиц
 async function initDatabase() {
@@ -107,7 +167,7 @@ let gameState = {
   startTime: 0,
   baseSpeed: 2,
   currentSpeed: 2,
-  speedIncreaseInterval: 8, // секунд
+  speedIncreaseInterval: 8,
   width: 600,
   height: 800,
   generationInterval: 600
@@ -118,7 +178,11 @@ const MAX_PLAYERS = 17;
 
 function generateName() {
   const names = ['Гонщик', 'Спидер', 'Вихрь', 'Молния', 'Торнадо', 'Шторм'];
-  return names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
+  let name;
+  do {
+    name = names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
+  } while (!validateName(name));
+  return name;
 }
 
 function createObstacle() {
@@ -137,9 +201,9 @@ let speedTimer = null;
 
 function getSpeedMultiplier() {
   const playerCount = gameState.players.length;
-  if (playerCount <= 1) return 1.6;      // Очень быстро для одного
-  if (playerCount <= 3) return 1.3;       // Быстро для 2-3
-  return 1.0;                              // Нормально для 4+
+  if (playerCount <= 1) return 1.6;
+  if (playerCount <= 3) return 1.3;
+  return 1.0;
 }
 
 function startGame() {
@@ -158,7 +222,6 @@ function startGame() {
     if (gameState.gameActive) gameState.obstacles.push(createObstacle());
   }, gameState.generationInterval);
   
-  // Увеличение скорости (бесконечно, без maxSpeed)
   speedTimer = setInterval(() => {
     if (gameState.gameActive) {
       const multiplier = getSpeedMultiplier();
@@ -188,7 +251,6 @@ function stopGame(reason = 'normal') {
 function updateGame() {
   if (!gameState.gameActive) return;
 
-  // Проверка на наличие активных игроков
   const hasActive = gameState.players.some(p => p.active);
   if (!hasActive) {
     stopGame('noPlayers');
@@ -197,33 +259,25 @@ function updateGame() {
 
   gameState.obstacles.forEach(o => o.y += gameState.currentSpeed);
   
-  // ===== НОВОЕ: проверка, достигли ли препятствия нижнего края =====
   const obstaclesAtBottom = gameState.obstacles.filter(o => o.y + o.h >= gameState.height);
   
   if (obstaclesAtBottom.length > 0) {
-    // Препятствия достигли нижнего края - игра заканчивается
     const timeSurvived = Math.floor((Date.now() - gameState.startTime) / 1000);
     const score = timeSurvived * 10;
     
-    // Все игроки проигрывают (если препятствие достигло низа)
-    gameState.players.forEach(p => {
-      p.active = false;
-    });
+    gameState.players.forEach(p => p.active = false);
     
-    // Отправляем информацию о конце игры
     io.emit('playersUpdate', gameState.players);
     io.emit('gameOver', { winner: null, score: score, reason: 'Препятствие достигло финиша' });
     stopGame();
     return;
   }
   
-  // Удаляем препятствия, ушедшие за экран (хотя они не должны, т.к. выше мы остановили игру)
   gameState.obstacles = gameState.obstacles.filter(o => o.y < gameState.height);
 
   const active = gameState.players.filter(p => p.active);
   const crashed = new Set();
 
-  // Столкновения с препятствиями
   for (let p of active) {
     for (let o of gameState.obstacles) {
       if (p.x - 15 < o.x + o.w && p.x + 15 > o.x &&
@@ -234,7 +288,6 @@ function updateGame() {
     }
   }
 
-  // Столкновения между игроками + мощное отталкивание
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const p1 = active[i];
@@ -299,6 +352,13 @@ function updateGame() {
 
 io.on('connection', async (socket) => {
   console.log('Подключился:', socket.id);
+  const clientIP = socket.handshake.address;
+
+  if (bannedIPs.has(clientIP)) {
+    socket.emit('error', 'Ваш IP забанен');
+    socket.disconnect();
+    return;
+  }
 
   try {
     const [race, whac, snake, guess] = await Promise.all([
@@ -313,14 +373,27 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('join', ({ name, isAdmin, password }) => {
+    // Жёсткая проверка имени
+    if (!validateName(name)) {
+      socket.emit('error', 'Недопустимое имя пользователя. Используйте только буквы и цифры, не менее 2 символов.');
+      logAdmin('blocked_name', 'SYSTEM', name, 'Попытка использовать недопустимое имя');
+      return;
+    }
+
     if (gameState.players.some(p => p.id === socket.id)) {
       socket.emit('error', 'Вы уже подключены');
+      return;
+    }
+
+    if (bannedUsers.has(socket.id)) {
+      socket.emit('error', 'Вы забанены');
       return;
     }
 
     if (isAdmin && password === ADMIN_PASSWORD) {
       gameState.hostId = socket.id;
       socket.emit('hostStatus', true);
+      logAdmin('admin_login', name, 'SYSTEM', 'Админ вошёл');
     } else if (isAdmin) {
       socket.emit('error', 'Неверный пароль админа');
       return;
@@ -333,10 +406,11 @@ io.on('connection', async (socket) => {
 
     const player = {
       id: socket.id,
-      name: name || generateName(),
+      name: name,
       x: Math.random() * (gameState.width - 80) + 40,
       active: true,
-      hue: (gameState.players.length * 30) % 360
+      hue: (gameState.players.length * 30) % 360,
+      ip: clientIP
     };
     gameState.players.push(player);
 
@@ -381,7 +455,6 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // Обработка выстрелов
   socket.on('shoot', ({ x, y, bulletId }) => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player && player.active && gameState.gameActive) {
@@ -397,10 +470,95 @@ io.on('connection', async (socket) => {
     io.to('game').emit('bulletHit', { bulletId, obstacleId });
   });
 
+  // Админ-команды
+  socket.on('adminKick', ({ targetId, reason, adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) {
+      socket.emit('error', 'Только хост может кикать');
+      return;
+    }
+    
+    const target = gameState.players.find(p => p.id === targetId);
+    if (target) {
+      io.to(targetId).emit('error', `Вы были кикнуты: ${reason || 'Без причины'}`);
+      io.to(targetId).emit('kicked');
+      logAdmin('kick', admin.name, target.name, reason);
+      
+      gameState.players = gameState.players.filter(p => p.id !== targetId);
+      io.to('game').emit('playersUpdate', gameState.players);
+    }
+  });
+
+  socket.on('adminBan', ({ targetId, reason, adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) {
+      socket.emit('error', 'Только хост может банить');
+      return;
+    }
+    
+    const target = gameState.players.find(p => p.id === targetId);
+    if (target) {
+      bannedUsers.set(targetId, { reason, admin: admin.name, time: Date.now(), name: target.name });
+      if (target.ip) bannedIPs.add(target.ip);
+      
+      io.to(targetId).emit('error', `Вы были забанены: ${reason || 'Нарушение правил'}`);
+      io.to(targetId).emit('banned');
+      logAdmin('ban', admin.name, target.name, reason);
+      
+      gameState.players = gameState.players.filter(p => p.id !== targetId);
+      io.to('game').emit('playersUpdate', gameState.players);
+    }
+  });
+
+  socket.on('adminTransferHost', ({ targetId, adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) {
+      socket.emit('error', 'Только хост может передавать права');
+      return;
+    }
+    
+    const target = gameState.players.find(p => p.id === targetId);
+    if (target) {
+      gameState.hostId = targetId;
+      io.to('game').emit('hostStatus', targetId);
+      io.to(targetId).emit('hostStatus', true);
+      logAdmin('transfer_host', admin.name, target.name);
+    }
+  });
+
+  socket.on('adminGetLogs', ({ adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) return;
+    
+    socket.emit('adminLogs', adminLog.slice(0, 50));
+  });
+
+  socket.on('adminGetBanned', ({ adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) return;
+    
+    const bannedList = Array.from(bannedUsers.entries()).map(([id, data]) => ({
+      id, ...data
+    }));
+    socket.emit('adminBannedList', bannedList);
+  });
+
+  socket.on('adminUnban', ({ targetId, adminName }) => {
+    const admin = gameState.players.find(p => p.id === socket.id);
+    if (!admin || socket.id !== gameState.hostId) return;
+    
+    if (bannedUsers.has(targetId)) {
+      const target = bannedUsers.get(targetId);
+      bannedUsers.delete(targetId);
+      logAdmin('unban', admin.name, target.name || targetId);
+    }
+  });
+
   socket.on('leave', () => {
     console.log('Игрок вышел по команде leave:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
     if (idx !== -1) {
+      const player = gameState.players[idx];
       gameState.players.splice(idx, 1);
       if (socket.id === gameState.hostId) {
         gameState.hostId = gameState.players[0]?.id || null;
@@ -421,6 +579,7 @@ io.on('connection', async (socket) => {
     console.log('Отключился:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
     if (idx !== -1) {
+      const player = gameState.players[idx];
       gameState.players.splice(idx, 1);
       if (socket.id === gameState.hostId) {
         gameState.hostId = gameState.players[0]?.id || null;
@@ -452,6 +611,7 @@ io.on('connection', async (socket) => {
     if (password === ADMIN_PASSWORD) {
       await clearAllScores();
       io.emit('leaderboards', { race: [], whac: [], snake: [], guess: [] });
+      logAdmin('clear_stats', 'ADMIN', 'ALL');
       console.log('Статистика очищена админом');
     }
   });

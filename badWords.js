@@ -365,7 +365,7 @@ const BAD_WORDS = [
 'dog fucker',
 'dog fucking',
 'dog shit',
-'dog's bollocks',
+'dog\'s bollocks',
 'dog-fucker',
 'dogshit',
 'dogshits',

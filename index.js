@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
+console.log('DATABASE_URL:', process.env.DATABASE_URL ? '✅ установлена' : '❌ НЕ УСТАНОВЛЕНА');
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 

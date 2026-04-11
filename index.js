@@ -35,7 +35,7 @@ function validateName(name) {
       console.log(`[FILTER] Заблокировано имя "${name}" (содержит "${word}")`);
       return false;
     }
-    
+    /*
     // Проверка на слова с заменой букв на похожие (leet-вариации)
     const leetVariations = word
       .replace(/a/g, '[a@4]')
@@ -49,6 +49,7 @@ function validateName(name) {
       console.log(`[FILTER] Заблокировано имя "${name}" (leet-вариация "${word}")`);
       return false;
     }
+    */
   }
   
   // Проверка на спецсимволы (только буквы, цифры, подчёркивание и пробелы)

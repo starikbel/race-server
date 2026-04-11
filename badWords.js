@@ -815,7 +815,7 @@ const BAD_WORDS = [
 'mothafucked',
 'mothafucker',
 'mothafuckers',
-'mothafuckin'',
+'mothafuckin',
 'mothafucking',
 'mothafucks',
 'motherfuckings',

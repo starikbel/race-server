@@ -20,7 +20,6 @@ function isBadWordFallback(text) {
     'хуй', 'хуя', 'хую', 'хуем', 'хуи', 'пизда', 'пизды', 'пизде', 'пизду', 'пиздой',
     'бля', 'блять', 'блядь', 'ебан', 'ебать', 'ебучий', 'уебан', 'мудак', 'пидор',
     'сука', 'тварь', 'гнида', 'мразь', 'падла', 'сволочь', 'шлюха', 'проститутка',
-    'гомик', 'петух', 'лох', 'чмо', 'дебил', 'даун', 'кретин', 'идиот', 'долбоеб',
     'fuck', 'fucking', 'fucker', 'shit', 'shitting', 'asshole', 'bitch', 'cunt', 'dick',
     'cock', 'pussy', 'whore', 'slut', 'bastard', 'wanker', 'twat', 'fag', 'retard'
   ];
@@ -53,7 +52,6 @@ function validateName(name) {
   return true;
 }
 
-// ===== ОСТАЛЬНАЯ ЧАСТЬ СЕРВЕРА =====
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -244,6 +242,7 @@ function updateGame() {
     }
   }
 
+  // Столкновения между игроками с мощным отталкиванием
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
       const p1 = active[i];
@@ -259,8 +258,10 @@ function updateGame() {
           p2.x = Math.max(20, p2.x - force);
           p1.x = Math.min(gameState.width - 50, p1.x + force);
         }
+        // Рассылаем новые позиции ВСЕМ
         io.emit('playerMoved', { id: p1.id, x: p1.x });
         io.emit('playerMoved', { id: p2.id, x: p2.x });
+        // Событие столкновения с силой и направлением
         io.emit('playerCollision', { id1: p1.id, id2: p2.id, force: force });
       }
     }

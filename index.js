@@ -3,19 +3,61 @@ const http = require('http');
 const { Server } = require('socket.io');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const SwearingFilter = require('swearing-filter');
 
-// ===== НАСТРОЙКА ФИЛЬТРА ПЛОХИХ СЛОВ =====
-const filter = new SwearingFilter({
-  languages: ['ru', 'en'], // русский и английский
-  placeholder: '***'       // не используется, но можно оставить
-});
+// ===== ПОПЫТКА ПОДКЛЮЧИТЬ БИБЛИОТЕКУ swearing-filter =====
+let filter = null;
+try {
+  const SwearingFilter = require('swearing-filter');
+  filter = new SwearingFilter({ languages: ['ru', 'en'] });
+  console.log('✅ swearing-filter загружена');
+} catch (e) {
+  console.log('⚠️ swearing-filter не загружена, используем fallback');
+}
 
+// ===== FALLBACK-СПИСОК ПЛОХИХ СЛОВ =====
+function isBadWordFallback(text) {
+  const badWords = [
+    'хуй', 'хуя', 'хую', 'хуем', 'хуи', 'пизда', 'пизды', 'пизде', 'пизду', 'пиздой',
+    'бля', 'блять', 'блядь', 'ебан', 'ебать', 'ебучий', 'уебан', 'мудак', 'пидор',
+    'сука', 'тварь', 'гнида', 'мразь', 'падла', 'сволочь', 'шлюха', 'проститутка',
+    'гомик', 'петух', 'лох', 'чмо', 'дебил', 'даун', 'кретин', 'идиот', 'долбоеб',
+    'fuck', 'fucking', 'fucker', 'shit', 'shitting', 'asshole', 'bitch', 'cunt', 'dick',
+    'cock', 'pussy', 'whore', 'slut', 'bastard', 'wanker', 'twat', 'fag', 'retard'
+  ];
+  const lower = text.toLowerCase();
+  for (let word of badWords) {
+    if (lower.includes(word)) return true;
+  }
+  return false;
+}
+
+function validateName(name) {
+  if (!name || name.length < 2 || name.length > 20) return false;
+
+  let isBad = false;
+  if (filter && typeof filter.isBad === 'function') {
+    try { isBad = filter.isBad(name); } catch(e) {}
+  }
+  if (!isBad) isBad = isBadWordFallback(name);
+
+  if (isBad) {
+    console.log(`[FILTER] Заблокировано имя "${name}"`);
+    return false;
+  }
+
+  const validRegex = /^[a-zA-Zа-яА-ЯёЁ0-9_ ]+$/;
+  if (!validRegex.test(name)) {
+    console.log(`[FILTER] Недопустимые символы в имени "${name}"`);
+    return false;
+  }
+  return true;
+}
+
+// ===== ОСТАЛЬНАЯ ЧАСТЬ СЕРВЕРА =====
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// ===== БАЗА ДАННЫХ SQLITE =====
 const dbPath = path.join(__dirname, 'leaderboards.db');
 const db = new sqlite3.Database(dbPath);
 
@@ -75,27 +117,7 @@ function clearAllScores() {
   });
 }
 
-// ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-function validateName(name) {
-  if (!name || name.length < 2 || name.length > 20) return false;
-  
-  // Проверка на плохие слова через библиотеку
-  if (filter.isBad(name)) {
-    console.log(`[FILTER] Заблокировано имя "${name}" (содержит нецензурную лексику)`);
-    return false;
-  }
-  
-  // Проверка на допустимые символы (буквы, цифры, подчёркивание, пробел)
-  const validRegex = /^[a-zA-Zа-яА-ЯёЁ0-9_ ]+$/;
-  if (!validRegex.test(name)) {
-    console.log(`[FILTER] Заблокировано имя "${name}" (недопустимые символы)`);
-    return false;
-  }
-  
-  return true;
-}
-
-// ===== СОСТОЯНИЕ ИГРЫ =====
+// ===== ИГРОВАЯ ЛОГИКА =====
 let gameState = {
   players: [],
   obstacles: [],
@@ -301,7 +323,6 @@ io.on('connection', async (socket) => {
 
     if (!validateName(name)) {
       socket.emit('error', 'Недопустимое имя пользователя. Используйте только буквы, цифры, подчёркивание и пробелы.');
-      console.log(`[FILTER] Имя "${name}" отклонено`);
       return;
     }
 
@@ -385,6 +406,21 @@ io.on('connection', async (socket) => {
     io.to('game').emit('bulletHit', { bulletId, obstacleId });
   });
 
+  socket.on('submitScore', async ({ game, name, score }) => {
+    if (!validateName(name)) {
+      console.log(`[FILTER] Отклонена попытка сохранить результат с недопустимым именем: ${name}`);
+      return;
+    }
+    await addScore(game, name, score);
+    const topScores = await getTopScores(game);
+    io.emit('leaderboards', { 
+      race: await getTopScores('race'), 
+      whac: await getTopScores('whac'), 
+      snake: await getTopScores('snake'),
+      guess: await getTopScores('guess')
+    });
+  });
+
   socket.on('leave', () => {
     console.log('Игрок вышел по команде leave:', socket.id);
     const idx = gameState.players.findIndex(p => p.id === socket.id);
@@ -415,17 +451,6 @@ io.on('connection', async (socket) => {
     socket.leave('game');
   });
 
-  socket.on('submitScore', async ({ game, name, score }) => {
-    await addScore(game, name, score);
-    const topScores = await getTopScores(game);
-    io.emit('leaderboards', { 
-      race: await getTopScores('race'), 
-      whac: await getTopScores('whac'), 
-      snake: await getTopScores('snake'),
-      guess: await getTopScores('guess')
-    });
-  });
-
   socket.on('adminClearStats', async (password) => {
     if (password === ADMIN_PASSWORD) {
       await clearAllScores();
@@ -435,7 +460,7 @@ io.on('connection', async (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Сервер гонки на порту ${PORT}`);
 });

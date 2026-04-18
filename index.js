@@ -3,16 +3,22 @@ const http = require('http');
 const { Server } = require('socket.io');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const SwearingFilter = require('swearing-filter');
+
+// ===== НАСТРОЙКА ФИЛЬТРА ПЛОХИХ СЛОВ =====
+const filter = new SwearingFilter({
+  languages: ['ru', 'en'], // русский и английский
+  placeholder: '***'       // не используется, но можно оставить
+});
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// ===== БАЗА ДАННЫХ SQLITE (файл сохранится на Railway) =====
+// ===== БАЗА ДАННЫХ SQLITE =====
 const dbPath = path.join(__dirname, 'leaderboards.db');
 const db = new sqlite3.Database(dbPath);
 
-// Создаём таблицы, если их нет
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS race (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +47,6 @@ db.serialize(() => {
   console.log('✅ Таблицы SQLite созданы');
 });
 
-// Функции для работы с лидерами
 function getTopScores(game, limit = 10) {
   return new Promise((resolve, reject) => {
     db.all(`SELECT name, score, date FROM ${game} ORDER BY score DESC LIMIT ?`, [limit], (err, rows) => {
@@ -70,7 +75,27 @@ function clearAllScores() {
   });
 }
 
-// ===== ОСТАЛЬНОЙ КОД ИГРЫ (без изменений) =====
+// ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+function validateName(name) {
+  if (!name || name.length < 2 || name.length > 20) return false;
+  
+  // Проверка на плохие слова через библиотеку
+  if (filter.isBad(name)) {
+    console.log(`[FILTER] Заблокировано имя "${name}" (содержит нецензурную лексику)`);
+    return false;
+  }
+  
+  // Проверка на допустимые символы (буквы, цифры, подчёркивание, пробел)
+  const validRegex = /^[a-zA-Zа-яА-ЯёЁ0-9_ ]+$/;
+  if (!validRegex.test(name)) {
+    console.log(`[FILTER] Заблокировано имя "${name}" (недопустимые символы)`);
+    return false;
+  }
+  
+  return true;
+}
+
+// ===== СОСТОЯНИЕ ИГРЫ =====
 let gameState = {
   players: [],
   obstacles: [],
@@ -90,7 +115,11 @@ const MAX_PLAYERS = 17;
 
 function generateName() {
   const names = ['Гонщик', 'Спидер', 'Вихрь', 'Молния', 'Торнадо', 'Шторм'];
-  return names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
+  let name;
+  do {
+    name = names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
+  } while (!validateName(name));
+  return name;
 }
 
 function createObstacle() {
@@ -270,6 +299,12 @@ io.on('connection', async (socket) => {
   socket.on('join', ({ name, isAdmin, password }) => {
     console.log(`🔥 JOIN получен от ${socket.id}, имя: ${name}, isAdmin: ${isAdmin}`);
 
+    if (!validateName(name)) {
+      socket.emit('error', 'Недопустимое имя пользователя. Используйте только буквы, цифры, подчёркивание и пробелы.');
+      console.log(`[FILTER] Имя "${name}" отклонено`);
+      return;
+    }
+
     if (gameState.players.some(p => p.id === socket.id)) {
       socket.emit('error', 'Вы уже подключены');
       return;
@@ -290,7 +325,7 @@ io.on('connection', async (socket) => {
 
     const player = {
       id: socket.id,
-      name: name || generateName(),
+      name: name,
       x: Math.random() * (gameState.width - 80) + 40,
       active: true,
       hue: (gameState.players.length * 30) % 360
